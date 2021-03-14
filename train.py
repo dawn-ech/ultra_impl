@@ -15,6 +15,11 @@ import torch.optim as optim
 from utils.utils import weights_init_normal, compute_loss
 
 from mymodel import UltraNet
+import test
+
+from data.dataset import DACDataset
+from data.augmentation import Augmentation, BaseTransform
+
 
 wdir = 'weights' + os.sep  # weights dir
 last = wdir + 'last.pt'
@@ -77,6 +82,37 @@ def train():
     # scheduler = lr_scheduler.MultiStepLR(optimizer, milestones=[round(epochs * x) for x in [0.8, 0.9]], gamma=0.1)
     scheduler.last_epoch = 0
 
+    root = "/share/DAC2020/dataset/"
+    dataset = DACDataset(root, "train", BaseTransform(320, 160))
+
+    # Dataloader
+    batch_size = min(batch_size, len(dataset))
+    nw = min([os.cpu_count(), batch_size if batch_size > 1 else 0, 8])  # number of workers
+    dataloader = torch.utils.data.DataLoader(dataset,
+                                             batch_size=batch_size,
+                                             num_workers=nw,
+                                             shuffle=not opt.rect,  # Shuffle=True unless rectangular training is used
+                                             pin_memory=True,
+                                             #collate_fn=dataset.collate_fn
+                                             )
+
+    # Testloader
+    testloader = torch.utils.data.DataLoader(DACDataset(root, "test", BaseTransform(320, 160)),
+                                             batch_size=batch_size * 2,
+                                             num_workers=nw,
+                                             pin_memory=True,
+                                             #collate_fn=dataset.collate_fn
+                                             )
+
+    nc = 13
+    model.nc = nc  # attach number of classes to model
+    model.arc = opt.arc  # attach yolo architecture
+    model.hyp = hyp  # attach hyperparameters to model
+    #model.class_weights = labels_to_class_weights(dataset.labels, nc).to(device)  # attach class weights
+    model.class_weights = torch.ones(13)/13
+    maps = np.zeros(nc)  # mAP per class
+
+
     for epoch in range(opt.epochs):
         model.train()
         start_time = time.time()
@@ -117,7 +153,14 @@ def train():
 
         # process data of current epoch
         final_epoch = (epoch + 1 == epochs)
-        results = test.test(...)
+        results = test.test(batch_size=batch_size * 2,
+                            img_size=img_size_test,
+                            model=model,
+                            conf_thres=0.001,  # 0.001 if opt.evolve or (final_epoch and is_coco) else 0.01,
+                            iou_thres=0.6,
+                            save_json=final_epoch and is_coco,
+                            single_cls=opt.single_cls,
+                            dataloader=testloader)
 
         # Write epoch results
         with open(results_file, 'a') as f:

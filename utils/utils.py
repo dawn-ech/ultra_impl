@@ -85,6 +85,51 @@ class FocalLoss(nn.Module):
         else:  # 'none'
             return loss
 
+def bbox_iou(box1, box2, x1y1x2y2=True, GIoU=False, DIoU=False, CIoU=False):
+    # Returns the IoU of box1 to box2. box1 is 4, box2 is nx4
+    box2 = box2.t()
+
+    # Get the coordinates of bounding boxes
+    if x1y1x2y2:  # x1, y1, x2, y2 = box1
+        b1_x1, b1_y1, b1_x2, b1_y2 = box1[0], box1[1], box1[2], box1[3]
+        b2_x1, b2_y1, b2_x2, b2_y2 = box2[0], box2[1], box2[2], box2[3]
+    else:  # x, y, w, h = box1
+        b1_x1, b1_x2 = box1[0] - box1[2] / 2, box1[0] + box1[2] / 2
+        b1_y1, b1_y2 = box1[1] - box1[3] / 2, box1[1] + box1[3] / 2
+        b2_x1, b2_x2 = box2[0] - box2[2] / 2, box2[0] + box2[2] / 2
+        b2_y1, b2_y2 = box2[1] - box2[3] / 2, box2[1] + box2[3] / 2
+
+    # Intersection area
+    inter = (torch.min(b1_x2, b2_x2) - torch.max(b1_x1, b2_x1)).clamp(0) * \
+            (torch.min(b1_y2, b2_y2) - torch.max(b1_y1, b2_y1)).clamp(0)
+
+    # Union Area
+    w1, h1 = b1_x2 - b1_x1, b1_y2 - b1_y1
+    w2, h2 = b2_x2 - b2_x1, b2_y2 - b2_y1
+    union = (w1 * h1 + 1e-16) + w2 * h2 - inter
+
+    iou = inter / union  # iou
+    if GIoU or DIoU or CIoU:
+        cw = torch.max(b1_x2, b2_x2) - torch.min(b1_x1, b2_x1)  # convex (smallest enclosing box) width
+        ch = torch.max(b1_y2, b2_y2) - torch.min(b1_y1, b2_y1)  # convex height
+        if GIoU:  # Generalized IoU https://arxiv.org/pdf/1902.09630.pdf
+            c_area = cw * ch + 1e-16  # convex area
+            return iou - (c_area - union) / c_area  # GIoU
+        if DIoU or CIoU:  # Distance or Complete IoU https://arxiv.org/abs/1911.08287v1
+            # convex diagonal squared
+            c2 = cw ** 2 + ch ** 2 + 1e-16
+            # centerpoint distance squared
+            rho2 = ((b2_x1 + b2_x2) - (b1_x1 + b1_x2)) ** 2 / 4 + ((b2_y1 + b2_y2) - (b1_y1 + b1_y2)) ** 2 / 4
+            if DIoU:
+                return iou - rho2 / c2  # DIoU
+            elif CIoU:  # https://github.com/Zzh-tju/DIoU-SSD-pytorch/blob/master/utils/box/box_utils.py#L47
+                v = (4 / math.pi ** 2) * torch.pow(torch.atan(w2 / h2) - torch.atan(w1 / h1), 2)
+                with torch.no_grad():
+                    alpha = v / (1 - iou + v)
+                return iou - (rho2 / c2 + v * alpha)  # CIoU
+
+    return iou
+
 
 def compute_loss(p, targets, model, giou_flag=True):  # predictions, targets, model
     ft = torch.cuda.FloatTensor if p[0].is_cuda else torch.Tensor
@@ -115,8 +160,16 @@ def compute_loss(p, targets, model, giou_flag=True):  # predictions, targets, mo
         nb = len(b)
         if nb:  # number of targets
             ng += nb
+            '''
+            # [] 可以看作索引
+            '''
+
             ps = pi[b, a, gj, gi]  # prediction subset corresponding to targets
             # ps[:, 2:4] = torch.sigmoid(ps[:, 2:4])  # wh power loss (uncomment)
+
+            '''
+            pred : [0,1]xy, [2,3]wh [4]conf [5:]class Pro
+            '''
 
             # GIoU
             pxy = torch.sigmoid(ps[:, 0:2])  # pxy = pxy * s - (s - 1) / 2,  s = 1.5  (scale_xy)
@@ -136,25 +189,26 @@ def compute_loss(p, targets, model, giou_flag=True):  # predictions, targets, mo
                 t[range(nb), tcls[i]] = 1.0
                 lcls += BCEcls(ps[:, 5:], t)  # BCE
                 # lcls += CE(ps[:, 5:], tcls[i])  # CE
-
+                
+                '''
                 # Instance-class weighting (use with reduction='none')
                 # nt = t.sum(0) + 1  # number of targets per class
                 # lcls += (BCEcls(ps[:, 5:], t) / nt).mean() * nt.mean()  # v1
                 # lcls += (BCEcls(ps[:, 5:], t) / nt[tcls[i]].view(-1,1)).mean() * nt.mean()  # v2
+                '''
 
-            # Append targets to text file
-            # with open('targets.txt', 'a') as file:
-            #     [file.write('%11.5g ' * 4 % tuple(x) + '\n') for x in torch.cat((txy[i], twh[i]), 1)]
-
+        # obj loss(conf)
         if 'default' in arc:  # separate obj and cls
             lobj += BCEobj(pi[..., 4], tobj)  # obj loss
 
+        # class loss
         elif 'BCE' in arc:  # unified BCE (80 classes)
             t = torch.zeros_like(pi[..., 5:])  # targets
             if nb:
-                t[b, a, gj, gi, tcls[i]] = 1.0
+                t[b, a, gj, gi, tcls[i]] = 1.0 #正样本置信度设为1
             lobj += BCE(pi[..., 5:], t)
 
+        # class loss (1(backgroud)+num_class)
         elif 'CE' in arc:  # unified CE (1 background + 80 classes)
             t = torch.zeros_like(pi[..., 0], dtype=torch.long)  # targets
             if nb:

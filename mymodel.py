@@ -29,7 +29,7 @@ class YOLOLayer(nn.Module):
 
         self.anchors = torch.Tensor(anchors)
         self.na = len(anchors)  # number of anchors (3)
-        self.no = 6  # number of outputs
+        self.no = 13  # number of outputs
         self.nx = 0  # initialize number of x gridpoints
         self.ny = 0  # initialize number of y gridpoints
     def forward(self, p, img_size):
@@ -49,7 +49,6 @@ class YOLOLayer(nn.Module):
             io = p.clone()  # inference output
             io[..., :2] = torch.sigmoid(io[..., :2]) + self.grid_xy  # xy
             io[..., 2:4] = torch.exp(io[..., 2:4]) * self.anchor_wh  # wh yolo method
-            # io[..., 2:4] = ((torch.sigmoid(io[..., 2:4]) * 2) ** 3) * self.anchor_wh  # wh power method
             io[..., :4] *= self.stride  # 原始像素尺度
 
             
@@ -67,6 +66,7 @@ class UltraNet(nn.Module):
         A_BIT = 4
         conv2d_q = conv2d_Q_fn(W_BIT)
         # act_q = activation_quantize_fn(4)
+        nc = 13
 
         self.layers = nn.Sequential(
             conv2d_q(3, 16, kernel_size=3, stride=1, padding=1, bias=False),
@@ -111,7 +111,8 @@ class UltraNet(nn.Module):
 
 
             # nn.Conv2d(256, 18, kernel_size=1, stride=1, padding=0)
-            conv2d_q(64, 36, kernel_size=1, stride=1, padding=0)
+            # conv2d_q(64, 36, kernel_size=1, stride=1, padding=0)
+            conv2d_q(64, 6*(5+13), kernel_size=1, stride=1, padding=0)
             
         )
         self.yololayer = YOLOLayer([[20,20], [20,20], [20,20], [20,20], [20,20], [20,20]])
